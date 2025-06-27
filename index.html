@@ -3,53 +3,38 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-  <title>오늘의 그림</title>
+  <title>최종판 웹 그림판</title>
+  <!-- Fabric.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.2.4/fabric.min.js"></script>
   <style>
-    /*==================================================
-      기본 레이아웃 / 툴바 / 캔버스 스타일
-    ==================================================*/
-    * { box-sizing: border-box; margin:0; padding:0; }
+    /*── 기본 레이아웃 ──*/
+    * { box-sizing:border-box; margin:0; padding:0; }
     html, body { height:100%; }
-    body {
-      display: flex;
-      flex-direction: column;
-      font-family: sans-serif;
-      background: #f4f4f4;
-    }
+    body { display:flex; flex-direction:column; }
+    /*── 툴바 ──*/
     #toolbar {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      padding: 10px;
-      background: #333;
-      color: #fff;
-      gap: 8px;
-      user-select: none;
+      background:#333; color:#fff; padding:8px;
+      display:flex; flex-wrap:wrap; align-items:center; gap:6px;
     }
-    #toolbar select, #toolbar button, #toolbar input {
-      background: #444;
-      border: none;
-      color: #fff;
-      padding: 6px 10px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 14px;
+    #toolbar select,
+    #toolbar input,
+    #toolbar button {
+      background:#444; color:#fff; border:none;
+      padding:6px 8px; border-radius:4px; cursor:pointer;
+      font-size:14px;
     }
-    #toolbar select:hover, 
-    #toolbar button:hover, 
-    #toolbar input:hover {
-      background: #555;
-    }
+    #toolbar select:hover,
+    #toolbar input:hover,
+    #toolbar button:hover { background:#555; }
+    /*── 캔버스 컨테이너 ──*/
     #canvas-container {
-      flex: 1;
-      position: relative;
+      flex:1; position:relative;
+      /* 부모 높이에서 툴바 높이(약 48px) 제외 */
+      height: calc(100vh - 48px);
     }
     #canvas {
-      width: 100%;
-      height: 100%;
-      border-top: 1px solid #aaa;
-      display: block;
+      width:100%; height:100%; display:block;
+      background:#fff;
     }
   </style>
 </head>
@@ -64,7 +49,6 @@
     </select>
 
     <select id="brushType">
-      <!-- 30개 옵션 -->
       <option value="pencil">Pencil</option>
       <option value="circle">Circle</option>
       <option value="spray">Spray</option>
@@ -110,497 +94,351 @@
     <button id="export-pdf">PDF</button>
 
     <input type="file" id="imgUpload" accept="image/*"/>
-    <label>히스토리:<input type="range" id="history-slider" min="0" value="0"/></label>
+    <label>히스토리:
+      <input type="range" id="history-slider" min="0" value="0"/>
+    </label>
     <button id="autosave-toggle">Autosave OFF</button>
   </div>
 
-  <!-- 캔버스 영역 -->
+  <!-- 캔버스 -->
   <div id="canvas-container">
     <canvas id="canvas"></canvas>
   </div>
 
-  <!--=============== config.js ===============-->
   <script>
-  // 전역 설정값
-  const CONFIG = {
-    CANVAS_BG: '#fff',
-    HISTORY_MAX: 100,      // 최대 히스토리 개수 (순환 버퍼)
-    PATTERN_SRC: [
+  ;(async function(){
+    //── 유틸 ──
+    const loadImage = src => new Promise(r => {
+      const i = new Image();
+      i.crossOrigin = 'anonymous';
+      i.onload = () => r(i);
+      i.src = src;
+    });
+
+    //── 설정 ──
+    const PATTERNS = [
       'https://raw.githubusercontent.com/fabricjs/fabric.js/master/dist/assets/honey_im_subtle.png',
       'https://i.imgur.com/6XjGqMi.jpg',
       'https://i.imgur.com/QYGqpbK.png',
       'https://i.imgur.com/W7KU1tK.png'
-    ],
-    PDF_LIB_URL: 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'
-  };
-  </script>
+    ];
 
-  <!--=============== utils.js ===============-->
-  <script>
-  /**
-   * 이미지 로딩을 Promise 형태로 래핑
-   * @param {string} src 이미지 URL
-   * @returns {Promise<Image>}
-   */
-  function loadImage(src) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload  = ()  => resolve(img);
-      img.onerror = err => reject(err);
-      img.src = src;
+    //── 캔버스 생성 ──
+    const canvasEl = document.getElementById('canvas');
+    const canvas = new fabric.Canvas(canvasEl, {
+      preserveObjectStacking: true, backgroundColor: '#fff'
     });
-  }
 
-  /**
-   * sleep(ms): 비동기 지연
-   */
-  function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  /**
-   * 안전 실행: try/catch 래퍼
-   * @param {Function} fn 실행할 함수
-   */
-  async function safeExec(fn) {
-    try {
-      await fn();
-    } catch (e) {
-      console.error('Error in safeExec:', e);
-      alert('오류 발생: ' + e.message);
-    }
-  }
-  </script>
-
-  <!--============= history.js =============-->
-  <script>
-  /**
-   * 히스토리 매니저
-   */
-  class HistoryManager {
-    constructor(canvas) {
-      this.canvas = canvas;
-      this.stack  = [];
-      this.index  = -1;
-      this.max    = CONFIG.HISTORY_MAX;
-    }
-    // 현재 상태 스냅샷
-    save() {
-      // 순환 버퍼
-      if (this.stack.length >= this.max) {
-        this.stack.shift();
-        this.index--;
+    //── 히스토리 관리 ──
+    class History {
+      constructor(c) { this.c=c; this.stack=[]; this.idx=-1; }
+      save(){
+        const json = this.c.toJSON();
+        this.stack = this.stack.slice(0, this.idx+1);
+        this.stack.push(json);
+        this.idx = this.stack.length - 1;
+        this.sync();
       }
-      // 현재 JSON push
-      this.stack = this.stack.slice(0, this.index+1);
-      this.stack.push(this.canvas.toJSON());
-      this.index = this.stack.length - 1;
-      this.syncSlider();
-    }
-    // 이전 상태 복원
-    undo() {
-      if (this.index > 0) {
-        this.index--;
-        this.restore();
+      undo(){ if(this.idx>0){ this.idx--; this.restore(); }}
+      redo(){ if(this.idx < this.stack.length-1){ this.idx++; this.restore(); }}
+      restore(){
+        this.c.loadFromJSON(this.stack[this.idx], ()=> this.c.renderAll());
+        this.sync();
       }
-    }
-    // 다음 상태 복원
-    redo() {
-      if (this.index < this.stack.length - 1) {
-        this.index++;
-        this.restore();
-      }
-    }
-    // 특정 인덱스 복원
-    restore(idx=this.index) {
-      this.canvas.loadFromJSON(this.stack[idx], () => {
-        this.canvas.renderAll();
-        this.syncSlider();
-      });
-    }
-    // 히스토리 슬라이더 동기화
-    bindSlider(sliderEl) {
-      this.slider = sliderEl;
-      sliderEl.max   = this.stack.length - 1;
-      sliderEl.value = this.index;
-      sliderEl.oninput = () => {
-        this.index = parseInt(sliderEl.value, 10);
-        this.restore();
-      };
-    }
-    syncSlider() {
-      if (this.slider) {
-        this.slider.max   = this.stack.length - 1;
-        this.slider.value = this.index;
-      }
-    }
-  }
-  </script>
-
-  <!--=========== brushFactory.js ===========-->
-  <script>
-  /**
-   * 30가지 붓(Brush) 프리셋을 생성하는 팩토리
-   * @param {fabric.Canvas} canvas
-   * @param {string} type
-   * @param {object} options { color, width, opacity }
-   */
-  async function createBrush(canvas, type, options) {
-    const {color,width,opacity} = options;
-    let brush;
-    switch(type) {
-      case 'pencil':
-        brush = new fabric.PencilBrush(canvas);
-        break;
-      case 'circle':
-        brush = new fabric.CircleBrush(canvas);
-        break;
-      case 'spray':
-        brush = new fabric.SprayBrush(canvas);
-        break;
-      case 'pattern':
-        {
-          const img = await loadImage(CONFIG.PATTERN_SRC[0]);
-          brush = new fabric.PatternBrush(canvas);
-          brush.source = img;
-        }
-        break;
-      case 'texture':
-        {
-          const img = await loadImage(CONFIG.PATTERN_SRC[1]);
-          brush = new fabric.PatternBrush(canvas);
-          brush.source = img;
-        }
-        break;
-      case 'gradient':
-        {
-          // 캔버스 패턴으로 그라디언트 효과
-          const patCanvas = document.createElement('canvas');
-          patCanvas.width = patCanvas.height = 60;
-          const ctx = patCanvas.getContext('2d');
-          const grad = ctx.createLinearGradient(0,0,60,60);
-          grad.addColorStop(0, 'magenta');
-          grad.addColorStop(1, 'cyan');
-          ctx.fillStyle = grad;
-          ctx.fillRect(0,0,60,60);
-          brush = new fabric.PatternBrush(canvas);
-          brush.source = patCanvas;
-        }
-        break;
-      case 'dash':
-        brush = new fabric.PencilBrush(canvas);
-        brush.decimate = 0.5; // 끊어진 느낌
-        break;
-      case 'jitter':
-        {
-          brush = new fabric.PencilBrush(canvas);
-          const origMove = brush.onMouseMove;
-          brush.onMouseMove = pt => {
-            pt.x += (Math.random()-0.5)*4;
-            pt.y += (Math.random()-0.5)*4;
-            origMove.call(brush, pt);
-          };
-        }
-        break;
-      case 'smooth':
-        brush = new fabric.PencilBrush(canvas);
-        brush.decimate = 0.05;
-        break;
-      case 'calligraphy':
-        brush = new fabric.PencilBrush(canvas);
-        brush.width = width*3;
-        brush.strokeLineCap = 'square';
-        break;
-      case 'chalk':
-        brush = new fabric.PencilBrush(canvas);
-        brush.width = width*4;
-        brush.color = '#999';
-        brush.shadow = new fabric.Shadow({ color: '#eee', blur: 8 });
-        break;
-      case 'watercolor':
-        brush = new fabric.SprayBrush(canvas);
-        brush.dotWidth   = width * 2;
-        brush.dotSpacing = 2;
-        brush.opacity    = 0.3;
-        break;
-      case 'neon':
-        brush = new fabric.PencilBrush(canvas);
-        brush.shadow = new fabric.Shadow({ color, blur: 20 });
-        break;
-      case 'ribbon':
-        {
-          const patCanvas = document.createElement('canvas');
-          patCanvas.width = patCanvas.height = 40;
-          const ctx = patCanvas.getContext('2d');
-          ctx.fillStyle = color;
-          ctx.fillRect(0,0,40,10);
-          brush = new fabric.PatternBrush(canvas);
-          brush.source = patCanvas;
-        }
-        break;
-      case 'fountain':
-        brush = new fabric.SprayBrush(canvas);
-        break;
-      case 'stampCircle':
-        {
-          const img = await loadImage(CONFIG.PATTERN_SRC[2]);
-          brush = new fabric.PatternBrush(canvas);
-          brush.source = img;
-          brush.repeat = 12;
-        }
-        break;
-      case 'stampStar':
-        {
-          const img = await loadImage(CONFIG.PATTERN_SRC[3]);
-          brush = new fabric.PatternBrush(canvas);
-          brush.source = img;
-          brush.repeat = 8;
-        }
-        break;
-      case 'strokePattern':
-        {
-          const img = await loadImage(CONFIG.PATTERN_SRC[0]);
-          brush = new fabric.PatternBrush(canvas);
-          brush.source = img;
-        }
-        break;
-      case 'multiColor':
-        {
-          brush = new fabric.PencilBrush(canvas);
-          let hue = 0;
-          const origMove = brush.onMouseMove;
-          brush.onMouseMove = pt => {
-            hue = (hue + 1) % 360;
-            brush.color = `hsl(${hue},100%,50%)`;
-            origMove.call(brush, pt);
-          };
-        }
-        break;
-      case 'dynamicWidth':
-        {
-          brush = new fabric.PencilBrush(canvas);
-          const origMove = brush.onMouseMove;
-          brush.onMouseMove = pt => {
-            const pts = brush._points || [];
-            const last = pts[pts.length - 1];
-            if (last) {
-              const dist = Math.hypot(pt.x - last.x, pt.y - last.y);
-              brush.width = Math.max(1, width - dist/2);
-            }
-            origMove.call(brush, pt);
-          };
-        }
-        break;
-      case 'pressure':
-        // 미지원 브라우저는 dynamicWidth fallback
-        return createBrush(canvas, 'dynamicWidth', {color,width,opacity});
-      case 'smudge':
-        brush = new fabric.PencilBrush(canvas);
-        brush.shadow = new fabric.Shadow({ color, blur: 5 });
-        break;
-      case 'emboss':
-        brush = new fabric.PencilBrush(canvas);
-        brush.shadow = new fabric.Shadow({ color:'#fff', blur:2, offsetX:-1, offsetY:-1 });
-        break;
-      case 'blur':
-        brush = new fabric.PencilBrush(canvas);
-        brush.shadow = new fabric.Shadow({ color:'#000', blur:5 });
-        break;
-      case 'pastel':
-        brush = new fabric.PencilBrush(canvas);
-        brush.opacity = 0.5;
-        break;
-      case 'smoke':
-        brush = new fabric.SprayBrush(canvas);
-        brush.dotWidth = 8; brush.dotSpacing = 2; brush.opacity = 0.15;
-        break;
-      case 'flame':
-        brush = new fabric.SprayBrush(canvas);
-        brush.dotWidth = 30; brush.dotSpacing = 1; brush.color = 'orange'; brush.opacity = 0.25;
-        break;
-      case 'confetti':
-        brush = new fabric.SprayBrush(canvas);
-        const origC = brush.onMouseMove;
-        brush.onMouseMove = pt => {
-          brush.color = `hsl(${Math.random()*360},80%,60%)`;
-          origC.call(brush, pt);
+      bindSlider(slider){
+        this.slider = slider;
+        slider.oninput = e => {
+          this.idx = +e.target.value;
+          this.restore();
         };
-        break;
-      case 'wave':
-        {
-          brush = new fabric.PencilBrush(canvas);
-          const orig = brush.onMouseMove;
-          brush.onMouseMove = pt => {
-            pt.x += Math.sin(pt.y/8) * 5;
-            orig.call(brush, pt);
+        this.sync();
+      }
+      sync(){
+        if(!this.slider) return;
+        this.slider.max = this.stack.length-1;
+        this.slider.value = this.idx;
+      }
+    }
+    const history = new History(canvas);
+    history.bindSlider(document.getElementById('history-slider'));
+    canvas.on('object:added', ()=> history.save());
+    canvas.on('object:modified', ()=> history.save());
+    canvas.on('object:removed', ()=> history.save());
+    history.save();
+
+    //── 브러시 팩토리 ──
+    async function createBrush(type, opts){
+      const { color, width, opacity } = opts;
+      let b, orig;
+      switch(type){
+        case 'pencil':  b = new fabric.PencilBrush(canvas); break;
+        case 'circle':  b = new fabric.CircleBrush(canvas); break;
+        case 'spray':   b = new fabric.SprayBrush(canvas); break;
+        case 'pattern':
+          b = new fabric.PatternBrush(canvas);
+          b.source = await loadImage(PATTERNS[0]);
+          break;
+        case 'texture':
+          b = new fabric.PatternBrush(canvas);
+          b.source = await loadImage(PATTERNS[1]);
+          break;
+        case 'gradient':
+          {
+            const pc = document.createElement('canvas');
+            pc.width=pc.height=60;
+            const ctx = pc.getContext('2d');
+            const g = ctx.createLinearGradient(0,0,60,60);
+            g.addColorStop(0,'magenta'); g.addColorStop(1,'cyan');
+            ctx.fillStyle = g; ctx.fillRect(0,0,60,60);
+            b = new fabric.PatternBrush(canvas);
+            b.source = pc;
+          }
+          break;
+        case 'dash':
+          b = new fabric.PencilBrush(canvas);
+          b.decimate = 0.5;
+          break;
+        case 'jitter':
+          b = new fabric.PencilBrush(canvas);
+          orig = b.onMouseMove;
+          b.onMouseMove = p => {
+            p.x += (Math.random()-0.5)*4;
+            p.y += (Math.random()-0.5)*4;
+            orig.call(b,p);
           };
-        }
-        break;
-      default:
-        brush = new fabric.PencilBrush(canvas);
+          break;
+        case 'smooth':
+          b = new fabric.PencilBrush(canvas);
+          b.decimate = 0.05;
+          break;
+        case 'calligraphy':
+          b = new fabric.PencilBrush(canvas);
+          b.width = width * 3;
+          b.strokeLineCap = 'square';
+          break;
+        case 'chalk':
+          b = new fabric.PencilBrush(canvas);
+          b.width = width * 4;
+          b.color = '#999';
+          b.shadow = new fabric.Shadow({ color:'#eee', blur:8 });
+          break;
+        case 'watercolor':
+          b = new fabric.SprayBrush(canvas);
+          b.dotWidth=width*2; b.dotSpacing=2; b.opacity=0.3;
+          break;
+        case 'neon':
+          b = new fabric.PencilBrush(canvas);
+          b.shadow = new fabric.Shadow({ color, blur:20 });
+          break;
+        case 'ribbon':
+          {
+            const pc = document.createElement('canvas');
+            pc.width=pc.height=40;
+            const ctx = pc.getContext('2d');
+            ctx.fillStyle = color; ctx.fillRect(0,0,40,10);
+            b = new fabric.PatternBrush(canvas);
+            b.source = pc;
+          }
+          break;
+        case 'fountain':
+          b = new fabric.SprayBrush(canvas);
+          break;
+        case 'stampCircle':
+          b = new fabric.PatternBrush(canvas);
+          b.source = await loadImage(PATTERNS[2]);
+          b.repeat = 12;
+          break;
+        case 'stampStar':
+          b = new fabric.PatternBrush(canvas);
+          b.source = await loadImage(PATTERNS[3]);
+          b.repeat = 8;
+          break;
+        case 'strokePattern':
+          b = new fabric.PatternBrush(canvas);
+          b.source = await loadImage(PATTERNS[0]);
+          break;
+        case 'multiColor':
+          b = new fabric.PencilBrush(canvas);
+          let hue=0; orig = b.onMouseMove;
+          b.onMouseMove = p => {
+            hue=(hue+1)%360;
+            b.color = `hsl(${hue},100%,50%)`;
+            orig.call(b,p);
+          };
+          break;
+        case 'dynamicWidth':
+          b = new fabric.PencilBrush(canvas);
+          orig = b.onMouseMove;
+          b.onMouseMove = p => {
+            const pts=b._points||[], last=pts[pts.length-1];
+            if(last){
+              const d=Math.hypot(p.x-last.x,p.y-last.y);
+              b.width = Math.max(1, width - d/2);
+            }
+            orig.call(b,p);
+          };
+          break;
+        case 'pressure':
+          return createBrush('dynamicWidth', opts);
+        case 'smudge':
+          b = new fabric.PencilBrush(canvas);
+          b.shadow = new fabric.Shadow({ color, blur:5 });
+          break;
+        case 'emboss':
+          b = new fabric.PencilBrush(canvas);
+          b.shadow = new fabric.Shadow({ color:'#fff', blur:2, offsetX:-1, offsetY:-1 });
+          break;
+        case 'blur':
+          b = new fabric.PencilBrush(canvas);
+          b.shadow = new fabric.Shadow({ color:'#000', blur:5 });
+          break;
+        case 'pastel':
+          b = new fabric.PencilBrush(canvas);
+          b.opacity = 0.5;
+          break;
+        case 'smoke':
+          b = new fabric.SprayBrush(canvas);
+          b.dotWidth=8; b.dotSpacing=2; b.opacity=0.15;
+          break;
+        case 'flame':
+          b = new fabric.SprayBrush(canvas);
+          b.dotWidth=30; b.dotSpacing=1;
+          b.color='orange'; b.opacity=0.25;
+          break;
+        case 'confetti':
+          b = new fabric.SprayBrush(canvas);
+          orig = b.onMouseMove;
+          b.onMouseMove = p => {
+            b.color = `hsl(${Math.random()*360},80%,60%)`;
+            orig.call(b,p);
+          };
+          break;
+        case 'wave':
+          b = new fabric.PencilBrush(canvas);
+          orig = b.onMouseMove;
+          b.onMouseMove = p => {
+            p.x += Math.sin(p.y/8)*5;
+            orig.call(b,p);
+          };
+          break;
+        default:
+          b = new fabric.PencilBrush(canvas);
+      }
+      // 공통 세팅
+      b.color   = opts.color;
+      b.width   = opts.width;
+      b.opacity = opts.opacity;
+      return b;
     }
 
-    // 공통 속성 세팅
-    brush.color   = color;
-    brush.width   = width;
-    brush.opacity = opacity;
-    brush.decimate = brush.decimate || 0; // 기본값 보장
+    //── 툴바 바인딩 ──
+    const toolEl      = document.getElementById('tool');
+    const brushTypeEl = document.getElementById('brushType');
+    const colorEl     = document.getElementById('color');
+    const widthEl     = document.getElementById('width');
+    const opacityEl   = document.getElementById('opacity');
+    const undoBtn     = document.getElementById('undo');
+    const redoBtn     = document.getElementById('redo');
+    const deleteBtn   = document.getElementById('delete');
+    const clearBtn    = document.getElementById('clear');
+    const pngBtn      = document.getElementById('download-png');
+    const svgBtn      = document.getElementById('export-svg');
+    const pdfBtn      = document.getElementById('export-pdf');
+    const imgInput    = document.getElementById('imgUpload');
+    const autoBtn     = document.getElementById('autosave-toggle');
 
-    return brush;
-  }
-  </script>
+    async function applyTool(){
+      const t = toolEl.value;
+      canvas.isDrawingMode = (t==='brush'||t==='eraser');
+      canvas.selection     = (t==='select');
+      canvas.getObjects().forEach(o=>o.selectable = (t==='select'));
 
-  <!--============= ui.js ===============-->
-  <script>
-  /**
-   * UI 바인딩 및 툴 전환
-   */
-  function bindUI(canvas, history) {
-    const toolEl       = document.getElementById('tool');
-    const brushTypeEl  = document.getElementById('brushType');
-    const colorEl      = document.getElementById('color');
-    const widthEl      = document.getElementById('width');
-    const opacityEl    = document.getElementById('opacity');
-    const undoBtn      = document.getElementById('undo');
-    const redoBtn      = document.getElementById('redo');
-    const deleteBtn    = document.getElementById('delete');
-    const clearBtn     = document.getElementById('clear');
-    const downloadPng  = document.getElementById('download-png');
-    const exportSvgBtn = document.getElementById('export-svg');
-    const exportPdfBtn = document.getElementById('export-pdf');
-    const imgUpload    = document.getElementById('imgUpload');
-    const autosaveBtn  = document.getElementById('autosave-toggle');
-
-    // 툴 적용
-    async function applyTool() {
-      const tool = toolEl.value;
-      canvas.isDrawingMode = (tool === 'brush' || tool === 'eraser');
-      canvas.selection     = (tool === 'select');
-      canvas.getObjects().forEach(o => o.selectable = (tool === 'select'));
-
-      if (tool === 'brush') {
-        // 붓 생성
-        const brush = await createBrush(canvas, brushTypeEl.value, {
-          color:   colorEl.value,
-          width:   parseInt(widthEl.value, 10),
+      if(t==='brush'){
+        const brush = await createBrush(brushTypeEl.value, {
+          color: colorEl.value,
+          width: parseInt(widthEl.value,10),
           opacity: parseFloat(opacityEl.value)
         });
         canvas.freeDrawingBrush = brush;
       }
-      else if (tool === 'eraser') {
+      else if(t==='eraser'){
         const eb = new fabric.EraserBrush(canvas);
-        eb.width = parseInt(widthEl.value, 10);
+        eb.width = parseInt(widthEl.value,10);
         canvas.freeDrawingBrush = eb;
       }
     }
 
-    // 이벤트 리스너
-    toolEl.onchange      = applyTool;
-    brushTypeEl.onchange = applyTool;
-    [colorEl, widthEl, opacityEl].forEach(el => el.oninput = applyTool);
+    [toolEl,brushTypeEl].forEach(el=>el.onchange=applyTool);
+    [colorEl,widthEl,opacityEl].forEach(el=>el.oninput=applyTool);
 
-    undoBtn.onclick   = () => { history.undo(); };
-    redoBtn.onclick   = () => { history.redo(); };
+    undoBtn.onclick   = () => history.undo();
+    redoBtn.onclick   = () => history.redo();
     deleteBtn.onclick = () => {
-      const obj = canvas.getActiveObject();
-      if (obj) canvas.remove(obj);
+      const obj=canvas.getActiveObject();
+      if(obj) canvas.remove(obj);
       history.save();
     };
     clearBtn.onclick  = () => {
-      canvas.clear().setBackgroundColor(CONFIG.CANVAS_BG);
+      canvas.clear().setBackgroundColor('#fff',()=>canvas.renderAll());
       history.save();
     };
 
-    downloadPng.onclick = () => {
-      const data = canvas.toDataURL({ format:'png', multiplier:1 });
-      const link = document.createElement('a');
-      link.href = data;
-      link.download = `painting_${Date.now()}.png`;
-      link.click();
+    pngBtn.onclick = () => {
+      const url = canvas.toDataURL({ format:'png' });
+      const a = document.createElement('a');
+      a.href = url; a.download = `img_${Date.now()}.png`; a.click();
     };
-    exportSvgBtn.onclick = () => {
-      const svg = canvas.toSVG();
+    svgBtn.onclick = () => {
       const w = window.open();
-      w.document.write(svg);
+      w.document.write(canvas.toSVG());
     };
-    exportPdfBtn.onclick = async () => {
-      const mod = await import(CONFIG.PDF_LIB_URL);
-      const { jsPDF } = mod;
-      const pdf = new jsPDF({ unit:'pt', format:[canvas.width, canvas.height] });
-      pdf.addImage(canvas.toDataURL(), 'PNG', 0,0);
-      pdf.save(`painting_${Date.now()}.pdf`);
+    pdfBtn.onclick = async () => {
+      const { jsPDF } = await import('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+      const pdf = new jsPDF({ unit:'pt', format:[canvas.width,canvas.height] });
+      pdf.addImage(canvas.toDataURL(),'PNG',0,0);
+      pdf.save(`img_${Date.now()}.pdf`);
     };
 
-    imgUpload.onchange = e => {
-      const file = e.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = evt => {
-        fabric.Image.fromURL(evt.target.result, img => {
+    imgInput.onchange = e => {
+      const f = e.target.files[0];
+      if(!f) return;
+      const r = new FileReader();
+      r.onload = ev => {
+        fabric.Image.fromURL(ev.target.result, img=>{
           img.set({ left:50, top:50, scaleX:0.5, scaleY:0.5 });
           canvas.add(img);
           history.save();
-        }, { crossOrigin:'anonymous' });
+        },{ crossOrigin:'anonymous' });
       };
-      reader.readAsDataURL(file);
+      r.readAsDataURL(f);
     };
 
-    autosaveBtn.onclick = () => {
+    autoBtn.onclick = () => {
       history.autosave = !history.autosave;
-      autosaveBtn.textContent = history.autosave ? 'Autosave ON' : 'Autosave OFF';
+      autoBtn.textContent = history.autosave? 'Autosave ON' : 'Autosave OFF';
     };
 
-    // 키보드 단축키
-    document.addEventListener('keydown', e => {
-      if (e.ctrlKey && e.key === 'z') undoBtn.click();
-      if (e.ctrlKey && e.key === 'y') redoBtn.click();
-      if (e.key === 'Delete') deleteBtn.click();
+    // 단축키
+    document.addEventListener('keydown',e=>{
+      if(e.ctrlKey&&e.key==='z') undoBtn.click();
+      if(e.ctrlKey&&e.key==='y') redoBtn.click();
+      if(e.key==='Delete') deleteBtn.click();
     });
 
-    // 최초 툴 설정
-    applyTool();
-  }
-  </script>
-
-  <!--============ main.js =============-->
-  <script>
-  safeExec(async () => {
-    // 1) 캔버스 초기화
-    const canvasEl = document.getElementById('canvas');
-    const canvas   = new fabric.Canvas(canvasEl, {
-      backgroundColor: CONFIG.CANVAS_BG,
-      preserveObjectStacking: true
-    });
-
-    // 2) 히스토리 매니저 바인딩
-    const history = new HistoryManager(canvas);
-    history.bindSlider(document.getElementById('history-slider'));
-
-    // 3) UI 이벤트 바인딩
-    bindUI(canvas, history);
-
-    // 4) 캔버스 리사이즈 대응
-    function resize() {
-      const wr = canvasEl.parentElement.getBoundingClientRect();
-      canvas.setWidth(wr.width);
-      canvas.setHeight(wr.height);
+    //── 캔버스 리사이즈 ──
+    function resize(){
+      const box = document.getElementById('canvas-container').getBoundingClientRect();
+      canvas.setWidth(box.width);
+      canvas.setHeight(box.height);
       canvas.renderAll();
-      history.restore();  // 리사이즈 후에도 이전 상태 유지
     }
-    window.addEventListener('resize', resize);
+    window.addEventListener('resize',resize);
     resize();
 
-    // 5) Optional: 로컬Storage에서 autosave 불러오기
-    if (localStorage.getItem('autosave')) {
-      const json = localStorage.getItem('autosave');
-      canvas.loadFromJSON(JSON.parse(json), () => {
-        canvas.renderAll();
-        history.save();
-      });
-    }
-  });
+    // 최초 툴 적용
+    applyTool();
+  })();
   </script>
-
 </body>
 </html>
+```
